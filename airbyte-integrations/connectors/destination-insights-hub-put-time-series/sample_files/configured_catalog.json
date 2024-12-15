@@ -1,0 +1,23 @@
+{
+  "streams": [
+    {
+      "stream": {
+        "name": "machine_metrics",
+        "json_schema": {
+          "type": "object",
+          "required": ["_time"],
+          "properties": {
+            "_time": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "additionalProperties": true
+        },
+        "supported_sync_modes": ["full_refresh", "incremental"]
+      },
+      "sync_mode": "full_refresh",
+      "destination_sync_mode": "append"
+    }
+  ]
+}
