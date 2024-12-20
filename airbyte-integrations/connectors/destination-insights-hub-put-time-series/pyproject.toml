@@ -15,8 +15,8 @@ repository = "https://github.com/airbytehq/airbyte"
 packages = [ { include = "destination_insights_hub_put_time_series" }, {include = "main.py" } ]
 
 [tool.poetry.dependencies]
-python = "^3.9,<3.12"
-airbyte-cdk = "^0"
+python = "^3.9,<4.0"
+airbyte-cdk = "^2.0"
 
 [tool.poetry.scripts]
 destination-insights-hub-put-time-series = "destination_insights_hub_put_time_series.run:run"

@@ -1,3 +1,7 @@
+# File: source_insights_hub_get_time_series/destination.py
+
+import sys
+import os
 import time
 import requests
 from typing import Any, Dict, Iterable, List, Mapping, Optional
@@ -9,57 +13,14 @@ from airbyte_cdk.models import (
     ConnectorSpecification,
     ConfiguredAirbyteCatalog,
     Type,
-    AirbyteTraceMessage,
 )
+from .utils.oauth_authenticator import OAuthAuthenticator
+import logging
 
 
-class OAuthAuthenticator:
-    """Manages OAuth2 authentication for Insights Hub API."""
-
-    def __init__(
-        self,
-        token_refresh_endpoint: str,
-        client_id: str,
-        client_secret: str,
-        access_token_name: str = "access_token",
-        expires_in_name: str = "expires_in",
-    ):
-        self.token_refresh_endpoint = token_refresh_endpoint
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self.access_token_name = access_token_name
-        self.expires_in_name = expires_in_name
-        self.access_token: Optional[str] = None
-        self.token_expires_at: Optional[float] = None
-
-    def get_access_token(self) -> str:
-        if self.access_token and self.token_expires_at and self.token_expires_at > time.time():
-            return self.access_token
-
-        try:
-            response = requests.post(
-                self.token_refresh_endpoint,
-                data={
-                    "grant_type": "client_credentials",
-                    "client_id": self.client_id,
-                    "client_secret": self.client_secret,
-                },
-                timeout=30,
-            )
-            response.raise_for_status()
-            token_response = response.json()
-            self.access_token = token_response[self.access_token_name]
-            expires_in = token_response.get(self.expires_in_name, 3600)
-            self.token_expires_at = time.time() + expires_in - 60
-            return self.access_token
-        except requests.RequestException as e:
-            raise ValueError(f"Token retrieval failed: {str(e)}") from e
-
-
-def get_authenticator(config: dict) -> OAuthAuthenticator:
-    token_refresh_endpoint = f"https://{config['tenant_id']}.piam.eu1.mindsphere.io/oauth/token"
+def get_authenticator(config: Mapping[str, Any]) -> OAuthAuthenticator:
     return OAuthAuthenticator(
-        token_refresh_endpoint=token_refresh_endpoint,
+        token_refresh_endpoint=f"https://{config['tenant_id']}.piam.eu1.mindsphere.io/oauth/token",
         client_id=config["client_id"],
         client_secret=config["client_secret"],
     )
@@ -70,12 +31,12 @@ class DestinationInsightsHubPutTimeSeries(Destination):
         super().__init__()
         self.logger = self._setup_logger()
 
-    def _setup_logger(self):
-        import logging
+    def _setup_logger(self) -> logging.Logger:
         logger = logging.getLogger("DestinationApiPut")
         logger.setLevel(logging.INFO)
         handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
         logger.addHandler(handler)
         return logger
 
@@ -90,7 +51,6 @@ class DestinationInsightsHubPutTimeSeries(Destination):
         :param logger: Optional logger (added for compatibility)
         :return: Connector configuration specification
         """
-
         return ConnectorSpecification(
             documentationUrl="https://docs.airbyte.com/integrations/destinations/ih-api-timeseries",
             supported_destination_sync_modes=["overwrite", "append"],
@@ -143,29 +103,18 @@ class DestinationInsightsHubPutTimeSeries(Destination):
         )
 
     def check(self, logger, config: dict) -> AirbyteConnectionStatus:
-        """
-        Check the connection by verifying token retrieval.
-        
-        :param logger: Logging object
-        :param config: Configuration dictionary
-        :return: Connection status
-        """
         try:
-            # Attempt to retrieve access token
             authenticator = get_authenticator(config)
-            access_token = authenticator.get_access_token()
-
-            # Log the retrieved token
-            logger.info(f"Retrieved access token: {access_token}")
-
-            # Validate token retrieval
-            logger.info("Successfully retrieved access token")
-            return AirbyteConnectionStatus(status=Status.SUCCEEDED)
+            if authenticator.check_connection():
+                logger.info("Successfully connected to the destination")
+                return AirbyteConnectionStatus(status=Status.SUCCEEDED)
+            else:
+                logger.error("Failed to connect to the destination")
+                return AirbyteConnectionStatus(status=Status.FAILED, message="Unable to authenticate with the destination")
         except Exception as e:
-            # Log and return failure status
-            error_msg = f"Connection check failed: {str(e)}"
-            logger.error(error_msg)
-            return AirbyteConnectionStatus(status=Status.FAILED, message=error_msg)
+            logger.error(
+                f"Exception while connecting to the destination: {str(e)}")
+            return AirbyteConnectionStatus(status=Status.FAILED, message=str(e))
 
     def write(
         self,
@@ -180,7 +129,7 @@ class DestinationInsightsHubPutTimeSeries(Destination):
 
         # Initialize authenticator
         authenticator = get_authenticator(config)
-        access_token = authenticator.get_access_token()
+        access_token = authenticator.get_token()
 
         # Prepare the API endpoint and headers
         api_url = f"https://gateway.eu1.mindsphere.io/api/iottimeseries/v3/timeseries/{config['asset_id']}/{config['aspect_id']}"
@@ -192,7 +141,8 @@ class DestinationInsightsHubPutTimeSeries(Destination):
         payload = []
         for message in input_messages:
             if message.type == Type.RECORD:
-                filtered_record = self.filter_qc_properties(message.record.data)
+                filtered_record = self.filter_qc_properties(
+                    message.record.data)
                 payload.append(filtered_record)
                 self.logger.debug(f"Queued record: {filtered_record}")
 
@@ -211,19 +161,24 @@ class DestinationInsightsHubPutTimeSeries(Destination):
 
         self.logger.info("Write process completed successfully.")
 
-
     def _send_payload(self, url: str, headers: dict, payload: List[dict], max_retries: int = 5) -> None:
         retry_delay = 1
         for attempt in range(max_retries):
             try:
-                response = requests.put(url, headers=headers, json=payload, timeout=30)
+                response = requests.put(
+                    url, headers=headers, json=payload, timeout=30)
                 response.raise_for_status()
-                self.logger.info(f"Successfully sent {len(payload)} records to {url}")
+                self.logger.info(
+                    f"Successfully sent {len(payload)} records to {url}")
                 return
             except requests.RequestException as e:
-                if attempt < max_retries - 1 and response.status_code in {429, 500, 502, 503, 504}:
-                    self.logger.warning(f"Retrying after failure: {str(e)}")
+                if attempt < max_retries - 1 and hasattr(response, 'status_code') and response.status_code in {429, 500, 502, 503, 504}:
+                    self.logger.warning(
+                        f"Retrying after failure ({attempt + 1}/{max_retries}): {str(e)}")
                     time.sleep(retry_delay)
                     retry_delay *= 2
                 else:
-                    raise ValueError(f"Failed to send payload after {attempt + 1} attempts: {str(e)}") from e
+                    self.logger.error(
+                        f"Failed to send payload after {attempt + 1} attempts: {str(e)}")
+                    raise ValueError(
+                        f"Failed to send payload after {attempt + 1} attempts: {str(e)}") from e

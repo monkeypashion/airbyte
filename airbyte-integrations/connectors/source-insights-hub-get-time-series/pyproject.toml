@@ -15,8 +15,9 @@ repository = "https://github.com/airbytehq/airbyte"
 packages = [ { include = "source_insights_hub_get_time_series" }, {include = "main.py" } ]
 
 [tool.poetry.dependencies]
-python = "^3.9,<3.12"
-airbyte-cdk = "^0"
+python = "^3.9,<4.0"
+airbyte-cdk = "^2.0"
+mimesis = "==6.1.1"
 
 [tool.poetry.scripts]
 source-insights-hub-get-time-series = "source_insights_hub_get_time_series.run:run"
