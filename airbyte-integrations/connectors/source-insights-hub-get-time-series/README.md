@@ -69,8 +69,8 @@ docker run --rm -v $(pwd)/secrets:/secrets -v $(pwd)/integration_tests:/integrat
 docker run --rm -v $(pwd)/secrets:/secrets airbyte/source-insights-hub-get-time-series:dev discover --config /secrets/config.json
 
 
-docker tag airbyte/source-insights-hub-get-time-series:dev tjpdocker/source-insights-hub-get-time-series:0.0.3
-docker push tjpdocker/source-insights-hub-get-time-series:0.0.3
+docker tag airbyte/source-insights-hub-get-time-series:dev tjpdocker/source-insights-hub-get-time-series:0.0.5
+docker push tjpdocker/source-insights-hub-get-time-series:0.0.5
 
 ```
 

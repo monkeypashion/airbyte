@@ -15,6 +15,9 @@ from airbyte_cdk.models import (
 from .utils.oauth_authenticator import OAuthAuthenticator
 import logging
 
+# Use Airbyte's logger directly without modification
+logger = logging.getLogger("airbyte")
+
 
 def get_authenticator(config: Mapping[str, Any]) -> OAuthAuthenticator:
     return OAuthAuthenticator(
@@ -27,16 +30,6 @@ def get_authenticator(config: Mapping[str, Any]) -> OAuthAuthenticator:
 class DestinationInsightsHubPutTimeSeries(Destination):
     def __init__(self):
         super().__init__()
-        self.logger = self._setup_logger()
-
-    def _setup_logger(self) -> logging.Logger:
-        logger = logging.getLogger("DestinationApiPut")
-        logger.setLevel(logging.INFO)
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
-        logger.addHandler(handler)
-        return logger
 
     def filter_qc_properties(self, record: Dict[str, Any]) -> Dict[str, Any]:
         """Remove fields ending with '_qc'."""
@@ -71,7 +64,7 @@ class DestinationInsightsHubPutTimeSeries(Destination):
         try:
             authenticator = get_authenticator(config)
             if authenticator.check_connection():
-                logger.info("Successfully connected to the destination")
+                logger.debug("Successfully connected to the destination")
                 return AirbyteConnectionStatus(status=Status.SUCCEEDED)
             else:
                 logger.error("Failed to connect to the destination")
@@ -87,7 +80,7 @@ class DestinationInsightsHubPutTimeSeries(Destination):
         configured_catalog: ConfiguredAirbyteCatalog,
         input_messages: Iterable[AirbyteMessage],
     ) -> Iterable[AirbyteMessage]:
-        self.logger.info("Starting the write process...")
+        logger.debug("Starting the write process")
         authenticator = get_authenticator(config)
         access_token = authenticator.get_token()
 
@@ -97,54 +90,94 @@ class DestinationInsightsHubPutTimeSeries(Destination):
             "Content-Type": "application/json",
         }
 
+        # Create a copy of headers for logging with redacted token
+        log_headers = headers.copy()
+        log_headers["Authorization"] = "Bearer [REDACTED]"
+
         payload = []
         for message in input_messages:
-            if message.type == Type.RECORD:
-                filtered_record = self.filter_qc_properties(
-                    message.record.data)
-                payload.append(filtered_record)
+            try:
+                if message.type == Type.RECORD:
+                    filtered_record = self.filter_qc_properties(
+                        message.record.data)
+                    payload.append(filtered_record)
 
-                if len(payload) >= 100:
-                    self._send_payload(api_url, headers, payload)
-                    payload.clear()
-            elif message.type == Type.STATE:
-                self.logger.info(f"Processing state message: {message.state}")
-                yield message
+                    if len(payload) >= 100:
+                        self._send_payload(
+                            api_url, headers, payload, log_headers)
+                        payload.clear()
+
+                elif message.type == Type.STATE:
+                    logger.debug(f"Processing state message: {message.state}")
+                    yield message
+
+            except ValueError as e:
+                logger.error(f"Error processing message: {e}")
+                raise  # Allow Airbyte to capture and report the failure
 
         if payload:
-            self.logger.info(f"Sending final batch of {len(payload)} records.")
-            self._send_payload(api_url, headers, payload)
+            logger.debug(f"Sending final batch of {len(payload)} records")
+            self._send_payload(api_url, headers, payload, log_headers)
 
-        self.logger.info("Write process completed successfully.")
+        logger.debug("Write process completed successfully")
 
-    def _send_payload(self, url: str, headers: dict, payload: List[dict], max_retries: int = 5) -> None:
-        retry_delay = 1
+    def _send_payload(self, url: str, headers: dict, payload: List[dict], log_headers: dict, max_retries: int = 5) -> None:
+        retry_delay = 1  # Initial delay for exponential backoff
+        session = requests.Session()  # Use a session for connection pooling
+
         for attempt in range(max_retries):
             try:
-                self.logger.info(f"Sending PUT request to URL: {url}")
-                response = requests.put(
+                logger.debug(f"Sending PUT request to URL: {url}")
+                response = session.put(
                     url, headers=headers, json=payload, timeout=30)
-                response.raise_for_status()
-                self.logger.info(
-                    f"Successfully sent {len(payload)} records to {url}")
-                return
-            except requests.RequestException as e:
-                # Log full request and response details on failure
-                if hasattr(e, 'response') and e.response is not None:
-                    self.logger.error(f"Request failed for URL: {url}")
-                    self.logger.error(f"Request Headers: {headers}")
-                    self.logger.error(f"Request Payload: {payload}")
-                    self.logger.error(
-                        f"Response Status Code: {e.response.status_code}")
-                    self.logger.error(f"Response Content: {e.response.text}")
 
-                if attempt < max_retries - 1 and hasattr(e.response, 'status_code') and e.response.status_code in {429, 500, 502, 503, 504}:
-                    self.logger.warning(
+                if response.status_code in {200, 204}:
+                    logger.debug(
+                        f"Successfully sent {len(payload)} records to {url}")
+                    return  # Request succeeded
+
+                elif response.status_code == 429:
+                    retry_after = response.headers.get("Retry-After")
+                    if retry_after:
+                        retry_delay = int(retry_after)
+                        logger.warning(
+                            f"Rate limited. Retrying after {retry_delay} seconds (Retry-After header).")
+                    else:
+                        logger.warning(
+                            f"Rate limited. Retry-After header missing, falling back to {retry_delay} seconds.")
+
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff for subsequent retries
+
+                else:
+                    logger.error(f"Request failed for URL: {url}")
+                    logger.error(f"Request Headers: {log_headers}")
+                    logger.error(f"Request Payload: {payload}")
+                    logger.error(
+                        f"Response Status Code: {response.status_code}")
+                    logger.error(f"Response Content: {response.text}")
+                    response.raise_for_status()
+
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Request failed for URL: {url}")
+                logger.error(f"Request Headers: {log_headers}")
+                logger.error(f"Request Payload: {payload}")
+
+                if hasattr(e, 'response') and e.response is not None:
+                    logger.error(
+                        f"Response Status Code: {e.response.status_code}")
+                    logger.error(f"Response Content: {e.response.text}")
+
+                if attempt < max_retries - 1 and hasattr(e, 'response') and e.response and e.response.status_code in {429, 500, 502, 503, 504}:
+                    logger.warning(
                         f"Retrying after failure ({attempt + 1}/{max_retries}): {str(e)}")
                     time.sleep(retry_delay)
-                    retry_delay *= 2
+                    retry_delay *= 2  # Exponential backoff
                 else:
-                    self.logger.error(
+                    logger.error(
                         f"Failed to send payload after {attempt + 1} attempts: {str(e)}")
                     raise ValueError(
                         f"Failed to send payload after {attempt + 1} attempts: {str(e)}") from e
+
+        raise ValueError(
+            f"Failed to send payload after {max_retries} attempts due to persistent issues.")

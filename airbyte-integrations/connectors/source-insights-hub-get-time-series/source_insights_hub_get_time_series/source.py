@@ -12,8 +12,8 @@ from airbyte_cdk.models import ConnectorSpecification
 
 from .utils.oauth_authenticator import OAuthAuthenticator
 
+# Let Airbyte's logger handle everything
 logger = logging.getLogger("airbyte")
-logger.setLevel(logging.DEBUG)
 
 
 class MachineMetricsStream(HttpStream, IncrementalMixin):
@@ -91,8 +91,7 @@ class MachineMetricsStream(HttpStream, IncrementalMixin):
         last_record = records[-1]
         if self.cursor_field in last_record:
             token = {self.cursor_field: last_record[self.cursor_field]}
-            logger.info(
-                f"Requesting next page with token: {token[self.cursor_field]}")
+            logger.debug(f"Next page token: {token[self.cursor_field]}")
             return token
         return None
 
@@ -103,27 +102,25 @@ class MachineMetricsStream(HttpStream, IncrementalMixin):
         if next_page_token:
             params["from"] = next_page_token[self.cursor_field]
         elif stream_state and stream_state.get(self.cursor_field):
-            logger.info(
-                f"Performing incremental sync. Using 'from' value from state: {stream_state[self.cursor_field]}")
+            logger.debug(
+                f"Incremental sync from: {stream_state[self.cursor_field]}")
             params["from"] = stream_state[self.cursor_field]
         else:
-            logger.info(
-                f"Starting full sync. Using start_date: {self.start_date}")
+            logger.debug(f"Full sync from start_date: {self.start_date}")
             params["from"] = self.start_date
         return params
 
     def read_records(self, **kwargs) -> Iterable[Mapping[str, Any]]:
-        logger.info("Starting to read records.")
+        logger.debug("Starting to read records")
         try:
             for record in super().read_records(**kwargs):
-                # Update the state for each record
                 self.state = self.get_updated_state(self.state, record)
                 yield record
         except Exception as e:
-            logger.error(f"Error reading records: {e}", exc_info=True)
+            logger.error(f"Error reading records: {str(e)}")
             raise
         finally:
-            logger.info("Finished reading records.")
+            logger.debug("Finished reading records")
 
     def parse_response(
         self, response: requests.Response, **kwargs
@@ -131,14 +128,20 @@ class MachineMetricsStream(HttpStream, IncrementalMixin):
         """
         Parse the HTTP response and log request/response details where necessary.
         """
-        logger.info(f"Request URL: {response.request.url}")
-        logger.info(f"Response Status Code: {response.status_code}")
+        # Create redacted headers for logging
+        log_headers = dict(response.request.headers)
+        if 'Authorization' in log_headers:
+            log_headers['Authorization'] = 'Bearer [REDACTED]'
 
-        if response.status_code != 200:
-            logger.error(f"Non-200 Response. URL: {response.request.url}")
-            logger.error(f"Headers: {response.request.headers}")
-            logger.error(f"Request Body: {response.request.body}")
-            logger.error(f"Response Content: {response.text}")
+        # Log at debug level for successful requests
+        if response.status_code in {200, 206, 304}:
+            logger.debug(f"Successful request to: {response.request.url}")
+        else:
+            # Log at error level for failed requests
+            logger.error(f"Request failed: {response.request.url}")
+            logger.error(f"Request headers: {log_headers}")
+            logger.error(f"Response status: {response.status_code}")
+            logger.error(f"Response content: {response.text}")
             response.raise_for_status()
 
         return response.json()
@@ -151,7 +154,7 @@ class SourceInsightsHubGetTimeSeries(AbstractSource):
             next(stream.read_records(sync_mode="full_refresh"))
             return True, None
         except Exception as e:
-            logger.error(f"Connection check failed: {e}")
+            logger.error(f"Connection check failed: {str(e)}")
             return False, str(e)
 
     def streams(self, config: Mapping[str, Any]) -> List[Stream]:
