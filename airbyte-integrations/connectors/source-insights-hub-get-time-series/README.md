@@ -64,6 +64,14 @@ docker run --rm airbyte/source-insights-hub-get-time-series:dev spec
 docker run --rm -v $(pwd)/secrets:/secrets airbyte/source-insights-hub-get-time-series:dev check --config /secrets/config.json
 docker run --rm -v $(pwd)/secrets:/secrets airbyte/source-insights-hub-get-time-series:dev discover --config /secrets/config.json
 docker run --rm -v $(pwd)/secrets:/secrets -v $(pwd)/integration_tests:/integration_tests airbyte/source-insights-hub-get-time-series:dev read --config /secrets/config.json --catalog /integration_tests/configured_catalog.json
+
+
+docker run --rm -v $(pwd)/secrets:/secrets airbyte/source-insights-hub-get-time-series:dev discover --config /secrets/config.json
+
+
+docker tag airbyte/source-insights-hub-get-time-series:dev tjpdocker/source-insights-hub-get-time-series:0.0.3
+docker push tjpdocker/source-insights-hub-get-time-series:0.0.3
+
 ```
 
 ### Running our CI test suite

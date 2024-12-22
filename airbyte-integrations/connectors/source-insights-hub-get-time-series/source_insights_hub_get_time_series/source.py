@@ -10,11 +10,10 @@ from airbyte_cdk.sources.streams.http import HttpStream
 from airbyte_cdk.sources.streams.http.requests_native_auth import TokenAuthenticator
 from airbyte_cdk.models import ConnectorSpecification
 
-
 from .utils.oauth_authenticator import OAuthAuthenticator
 
 logger = logging.getLogger("airbyte")
-logging.getLogger("urllib3").setLevel(logging.DEBUG)
+logger.setLevel(logging.DEBUG)
 
 
 class MachineMetricsStream(HttpStream, IncrementalMixin):
@@ -91,7 +90,10 @@ class MachineMetricsStream(HttpStream, IncrementalMixin):
             return None
         last_record = records[-1]
         if self.cursor_field in last_record:
-            return {self.cursor_field: last_record[self.cursor_field]}
+            token = {self.cursor_field: last_record[self.cursor_field]}
+            logger.info(
+                f"Requesting next page with token: {token[self.cursor_field]}")
+            return token
         return None
 
     def request_params(
@@ -101,30 +103,44 @@ class MachineMetricsStream(HttpStream, IncrementalMixin):
         if next_page_token:
             params["from"] = next_page_token[self.cursor_field]
         elif stream_state and stream_state.get(self.cursor_field):
+            logger.info(
+                f"Performing incremental sync. Using 'from' value from state: {stream_state[self.cursor_field]}")
             params["from"] = stream_state[self.cursor_field]
         else:
+            logger.info(
+                f"Starting full sync. Using start_date: {self.start_date}")
             params["from"] = self.start_date
         return params
 
     def read_records(self, **kwargs) -> Iterable[Mapping[str, Any]]:
-        records = []
+        logger.info("Starting to read records.")
         try:
             for record in super().read_records(**kwargs):
                 # Update the state for each record
                 self.state = self.get_updated_state(self.state, record)
-                records.append(record)
+                yield record
         except Exception as e:
-            logger.error(f"Error reading records: {e}")
+            logger.error(f"Error reading records: {e}", exc_info=True)
             raise
-
-        # Write the final state to the state file
-        yield {"type": "STATE", "state": {self.name: self.state}}
-        for record in records:
-            yield record
+        finally:
+            logger.info("Finished reading records.")
 
     def parse_response(
         self, response: requests.Response, **kwargs
     ) -> Iterable[Mapping]:
+        """
+        Parse the HTTP response and log request/response details where necessary.
+        """
+        logger.info(f"Request URL: {response.request.url}")
+        logger.info(f"Response Status Code: {response.status_code}")
+
+        if response.status_code != 200:
+            logger.error(f"Non-200 Response. URL: {response.request.url}")
+            logger.error(f"Headers: {response.request.headers}")
+            logger.error(f"Request Body: {response.request.body}")
+            logger.error(f"Response Content: {response.text}")
+            response.raise_for_status()
+
         return response.json()
 
 
@@ -135,6 +151,7 @@ class SourceInsightsHubGetTimeSeries(AbstractSource):
             next(stream.read_records(sync_mode="full_refresh"))
             return True, None
         except Exception as e:
+            logger.error(f"Connection check failed: {e}")
             return False, str(e)
 
     def streams(self, config: Mapping[str, Any]) -> List[Stream]:

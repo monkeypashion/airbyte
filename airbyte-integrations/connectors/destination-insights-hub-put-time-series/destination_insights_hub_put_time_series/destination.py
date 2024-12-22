@@ -1,10 +1,8 @@
-# File: source_insights_hub_get_time_series/destination.py
-
 import sys
 import os
 import time
 import requests
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping
 from airbyte_cdk.destinations import Destination
 from airbyte_cdk.models import (
     AirbyteMessage,
@@ -45,12 +43,6 @@ class DestinationInsightsHubPutTimeSeries(Destination):
         return {k: v for k, v in record.items() if not k.endswith('_qc')}
 
     def spec(self, logger=None) -> ConnectorSpecification:
-        """
-        Define the specification for the destination connector.
-
-        :param logger: Optional logger (added for compatibility)
-        :return: Connector configuration specification
-        """
         return ConnectorSpecification(
             documentationUrl="https://docs.airbyte.com/integrations/destinations/ih-api-timeseries",
             supported_destination_sync_modes=["overwrite", "append"],
@@ -66,39 +58,12 @@ class DestinationInsightsHubPutTimeSeries(Destination):
                     "tenant_id"
                 ],
                 "properties": {
-                    "asset_id": {
-                        "type": "string",
-                        "title": "Asset ID",
-                        "description": "Insights Hub Asset ID",
-                        "order": 0
-                    },
-                    "aspect_id": {
-                        "type": "string",
-                        "title": "Aspect ID",
-                        "description": "Insights Hub Aspect ID",
-                        "order": 1
-                    },
-                    "client_id": {
-                        "type": "string",
-                        "title": "Client ID",
-                        "description": "OAuth Client ID (Technical User Name)",
-                        "airbyte_secret": True,
-                        "order": 2
-                    },
-                    "client_secret": {
-                        "type": "string",
-                        "title": "Client Secret",
-                        "description": "OAuth Client Secret (Technical User Password)",
-                        "airbyte_secret": True,
-                        "order": 3
-                    },
-                    "tenant_id": {
-                        "type": "string",
-                        "title": "Tenant ID",
-                        "description": "Tenant ID",
-                        "order": 4
-                    }
-                }
+                    "asset_id": {"type": "string", "title": "Asset ID", "description": "Insights Hub Asset ID", "order": 0},
+                    "aspect_id": {"type": "string", "title": "Aspect ID", "description": "Insights Hub Aspect ID", "order": 1},
+                    "client_id": {"type": "string", "title": "Client ID", "description": "OAuth Client ID", "airbyte_secret": True, "order": 2},
+                    "client_secret": {"type": "string", "title": "Client Secret", "description": "OAuth Client Secret", "airbyte_secret": True, "order": 3},
+                    "tenant_id": {"type": "string", "title": "Tenant ID", "description": "Tenant ID", "order": 4},
+                },
             }
         )
 
@@ -122,16 +87,10 @@ class DestinationInsightsHubPutTimeSeries(Destination):
         configured_catalog: ConfiguredAirbyteCatalog,
         input_messages: Iterable[AirbyteMessage],
     ) -> Iterable[AirbyteMessage]:
-        """
-        Processes and sends records to the destination.
-        """
         self.logger.info("Starting the write process...")
-
-        # Initialize authenticator
         authenticator = get_authenticator(config)
         access_token = authenticator.get_token()
 
-        # Prepare the API endpoint and headers
         api_url = f"https://gateway.eu1.mindsphere.io/api/iottimeseries/v3/timeseries/{config['asset_id']}/{config['aspect_id']}"
         headers = {
             "Authorization": f"Bearer {access_token}",
@@ -144,9 +103,7 @@ class DestinationInsightsHubPutTimeSeries(Destination):
                 filtered_record = self.filter_qc_properties(
                     message.record.data)
                 payload.append(filtered_record)
-                self.logger.debug(f"Queued record: {filtered_record}")
 
-                # Send batch if payload size exceeds threshold
                 if len(payload) >= 100:
                     self._send_payload(api_url, headers, payload)
                     payload.clear()
@@ -154,7 +111,6 @@ class DestinationInsightsHubPutTimeSeries(Destination):
                 self.logger.info(f"Processing state message: {message.state}")
                 yield message
 
-        # Send remaining payload
         if payload:
             self.logger.info(f"Sending final batch of {len(payload)} records.")
             self._send_payload(api_url, headers, payload)
@@ -165,6 +121,7 @@ class DestinationInsightsHubPutTimeSeries(Destination):
         retry_delay = 1
         for attempt in range(max_retries):
             try:
+                self.logger.info(f"Sending PUT request to URL: {url}")
                 response = requests.put(
                     url, headers=headers, json=payload, timeout=30)
                 response.raise_for_status()
@@ -172,7 +129,16 @@ class DestinationInsightsHubPutTimeSeries(Destination):
                     f"Successfully sent {len(payload)} records to {url}")
                 return
             except requests.RequestException as e:
-                if attempt < max_retries - 1 and hasattr(response, 'status_code') and response.status_code in {429, 500, 502, 503, 504}:
+                # Log full request and response details on failure
+                if hasattr(e, 'response') and e.response is not None:
+                    self.logger.error(f"Request failed for URL: {url}")
+                    self.logger.error(f"Request Headers: {headers}")
+                    self.logger.error(f"Request Payload: {payload}")
+                    self.logger.error(
+                        f"Response Status Code: {e.response.status_code}")
+                    self.logger.error(f"Response Content: {e.response.text}")
+
+                if attempt < max_retries - 1 and hasattr(e.response, 'status_code') and e.response.status_code in {429, 500, 502, 503, 504}:
                     self.logger.warning(
                         f"Retrying after failure ({attempt + 1}/{max_retries}): {str(e)}")
                     time.sleep(retry_delay)

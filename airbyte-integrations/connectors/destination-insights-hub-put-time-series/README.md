@@ -35,6 +35,11 @@ and place them into `secrets/config.json`.
 poetry run destination-insights-hub-put-time-series spec
 poetry run destination-insights-hub-put-time-series check --config secrets/config.json
 poetry run destination-insights-hub-put-time-series write --config secrets/config.json --catalog sample_files/configured_catalog.json
+
+cat sample_files/input_messages.json | poetry run destination-insights-hub-put-time-series write \
+    --config secrets/config.json \
+    --catalog sample_files/configured_catalog.json
+
 ```
 
 ### Running tests
@@ -62,6 +67,17 @@ Then run any of the connector commands as follows:
 docker run --rm airbyte/destination-insights-hub-put-time-series:dev spec
 docker run --rm -v $(pwd)/secrets:/secrets airbyte/destination-insights-hub-put-time-series:dev check --config /secrets/config.json
 docker run --rm -v $(pwd)/secrets:/secrets -v $(pwd)/integration_tests:/integration_tests airbyte/destination-insights-hub-put-time-series:dev write --config /secrets/config.json --catalog /integration_tests/configured_catalog.json
+
+docker run --rm \
+    -v $(pwd)/secrets:/secrets \
+    -v $(pwd)/sample_files:/sample_files \
+    airbyte/destination-insights-hub-put-time-series:dev write \
+    --config /secrets/config.json \
+    --catalog /sample_files/configured_catalog.json \
+    < sample_files/input_messages.json
+
+docker tag airbyte/destination-insights-hub-put-time-series:dev tjpdocker/destination-insights-hub-put-time-series:0.0.3
+docker push tjpdocker/destination-insights-hub-put-time-series:0.0.3
 ```
 
 ### Running our CI test suite
