@@ -76,8 +76,8 @@ docker run --rm \
     --catalog /sample_files/configured_catalog.json \
     < sample_files/input_messages.json
 
-docker tag airbyte/destination-insights-hub-put-time-series:dev tjpdocker/destination-insights-hub-put-time-series:0.0.9
-docker push tjpdocker/destination-insights-hub-put-time-series:0.0.9
+docker tag airbyte/destination-insights-hub-put-time-series:dev tjpdocker/destination-insights-hub-put-time-series:0.0.14
+docker push tjpdocker/destination-insights-hub-put-time-series:0.0.14
 ```
 
 ### Running our CI test suite
