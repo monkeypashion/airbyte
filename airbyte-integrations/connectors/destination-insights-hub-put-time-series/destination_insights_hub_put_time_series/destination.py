@@ -15,14 +15,6 @@ from airbyte_cdk.models import (
 from .utils.oauth_authenticator import OAuthAuthenticator
 
 
-def log_message(message: str, level: str = "INFO"):
-    log_message = AirbyteMessage(
-        type=Type.LOG,
-        log=AirbyteLogMessage(level=level, message=message)
-    )
-    print(log_message.json())  # Send to stdout for Airbyte to parse
-
-
 def get_authenticator(config: Mapping[str, Any]) -> OAuthAuthenticator:
     return OAuthAuthenticator(
         token_refresh_endpoint=f"https://{config['tenant_id']}.piam.eu1.mindsphere.io/oauth/token",
@@ -34,28 +26,34 @@ def get_authenticator(config: Mapping[str, Any]) -> OAuthAuthenticator:
 class DestinationInsightsHubPutTimeSeries(Destination):
     def __init__(self, config: Optional[Mapping[str, Any]] = None, debug_mode: bool = False):
         super().__init__()
-        self.config = config
+        self.config = config or {}
         self.authenticator = None
         self.debug_mode = debug_mode
         self.batch_size = 100
-        self.session = requests.Session()  # Initialize session unconditionally
+        self.session = requests.Session()
 
         if config:
-            self.authenticator = get_authenticator(config)
+            self.authenticator = self.get_authenticator(config)
 
-    def log_payload(self, payload: List[Dict[str, Any]]):
-        if self.debug_mode:
-            log_message(
-                f"Payload: {payload[:3]}... (total {len(payload)} records)",
-                level="DEBUG"
+    def log_message(self, message: str, level: str = "INFO"):
+        """
+        Logs a message with the specified level.
+
+        :param message: The log message to print.
+        :param level: The severity level of the message.
+        """
+        # Use a default log level if self.config is None or not properly initialized
+        configured_level = self.config.get("log_level", "INFO").upper()
+        levels = ["DEBUG", "INFO", "WARN", "ERROR"]
+
+        # Log only if the message level is equal or higher priority than the configured level
+        if levels.index(level) >= levels.index(configured_level):
+            log_message = AirbyteMessage(
+                type=Type.LOG,
+                log=AirbyteLogMessage(level=level, message=message)
             )
-        else:
-            key_identifiers = [record.get("id", "unknown")
-                               for record in payload[:3]]
-            log_message(
-                f"Processed {len(payload)} records. Sample IDs: {key_identifiers}...",
-                level="DEBUG"
-            )
+            print(log_message.json())
+
 
     def filter_qc_properties(self, record: Dict[str, Any]) -> Dict[str, Any]:
         return {k: v for k, v in record.items() if not k.endswith('_qc')}
@@ -84,6 +82,7 @@ class DestinationInsightsHubPutTimeSeries(Destination):
                     "client_id": {"type": "string", "title": "Client ID", "description": "OAuth Client ID", "airbyte_secret": True, "order": 2},
                     "client_secret": {"type": "string", "title": "Client Secret", "description": "OAuth Client Secret", "airbyte_secret": True, "order": 3},
                     "tenant_id": {"type": "string", "title": "Tenant ID", "description": "Tenant ID", "order": 4},
+                    "log_level": {"type": "string", "enum": ["DEBUG", "INFO", "WARN", "ERROR"], "default": "INFO", "description": "Set the logging level for the destination."}
                 },
             }
         )
@@ -94,69 +93,116 @@ class DestinationInsightsHubPutTimeSeries(Destination):
             if not self.authenticator:
                 self.authenticator = get_authenticator(config)
             if self.authenticator.check_connection():
-                log_message(
+                self.log_message(
                     "Successfully connected to the destination.", level="INFO")
                 return AirbyteConnectionStatus(status=Status.SUCCEEDED)
             else:
-                log_message(
+                self.log_message(
                     "Unable to authenticate with the destination.", level="ERROR")
                 return AirbyteConnectionStatus(status=Status.FAILED, message="Unable to authenticate with the destination.")
         except Exception as e:
-            log_message(f"Connection check failed: {str(e)}", level="ERROR")
+            self.log_message(f"Connection check failed: {str(e)}", level="ERROR")
             return AirbyteConnectionStatus(status=Status.FAILED, message=str(e))
 
     def _send_payload(self, url: str, payload: List[dict], max_retries: int = 5) -> bool:
-        retry_delay = 1
+        base_delay = 1
+        max_delay = 300  # Maximum delay of 5 minutes
+        last_retry_after = base_delay  # Track the last retry delay
+        max_batch_size = 100  # Maximum allowed batch size
+        min_batch_size = 25  # Minimum allowed batch size
+        last_successful_state = None  # Track the last successfully written state
 
         for attempt in range(max_retries):
             try:
-                # Get a fresh token for each attempt - this will refresh if needed
                 token = self.authenticator.get_token()
                 headers = {
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
                 }
 
-                log_message(
-                    f"Token used for request: {self.authenticator.get_token()}", level="DEBUG")
-                response = requests.put(
-                    url, headers=headers, json=payload, timeout=30)
+                response = requests.put(url, headers=headers, json=payload, timeout=30)
+                
+                # Log detailed response for debugging
+                self.log_message(f"Request Headers: {headers}", level="DEBUG")
+                self.log_message(f"Request Body: {payload}", level="DEBUG")
+                self.log_message(f"Response Headers: {response.headers}", level="DEBUG")
+                self.log_message(f"Response Body: {response.text}", level="DEBUG")
 
                 if response.status_code in {200, 204}:
-                    log_message(
-                        f"Successfully sent {len(payload)} records to {url}", level="DEBUG")
+                    # Restore batch size gradually to the max allowed (100)
+                    if self.batch_size < max_batch_size:
+                        self.batch_size = min(max_batch_size, self.batch_size + 25)
+                        self.log_message(
+                            f"Batch processed successfully. Increasing batch size to {self.batch_size}.",
+                            level="INFO"
+                        )
+                    # Update last successful state
+                    last_successful_state = {"timestamp": max(record["_time"] for record in payload)}
                     return True
 
                 elif response.status_code == 429:
-                    retry_after = int(response.headers.get(
-                        "Retry-After", retry_delay))
-                    log_message(
-                        f"Rate limited. Retrying after {retry_after} seconds.", level="WARNING")
+                    # Handle Retry-After header or fallback
+                    retry_after_raw = response.headers.get("Retry-After", None)
+                    retry_after = min(
+                        max_delay,
+                        int(retry_after_raw) if retry_after_raw and retry_after_raw.isdigit() else last_retry_after * 2
+                    )
+                    last_retry_after = retry_after  # Update the last retry delay
+                    self.log_message(f"Rate limited (429). Retry-After Header: {retry_after_raw}. Calculated retry delay: {retry_after} seconds.", level="WARN")
+
+                    # Reduce batch size on repeated rate limits, with minimum cap
+                    if attempt > 1:
+                        self.batch_size = max(min_batch_size, self.batch_size // 2)
+                        self.log_message(f"Reducing batch size to {self.batch_size} due to repeated rate limits.", level="WARN")
+
                     time.sleep(retry_after)
-                    retry_delay *= 2
 
                 elif response.status_code == 401:
-                    log_message(
-                        "Authentication failed. Getting new token on next attempt.", level="WARNING")
-                    time.sleep(retry_delay)
-                    retry_delay *= 2
+                    self.log_message("Authentication failed. Refreshing token and retrying.", level="WARN")
+                    # Delay only for authentication recovery
+                    time.sleep(base_delay)
 
                 else:
-                    log_message(
-                        f"Request failed. Status: {response.status_code}, Response: {response.text}", level="ERROR")
-                    response.raise_for_status()
+                    # Log the request and response for other failures
+                    self.log_message(
+                        f"Request failed. Status: {response.status_code}, Response: {response.text}",
+                        level="ERROR"
+                    )
+                    self.log_message(
+                        f"Request URL: {url}, Headers: {headers}, Payload: {payload[:3]}... ({len(payload)} records total)",
+                        level="ERROR"
+                    )
+                    if attempt < max_retries - 1:
+                        # Apply exponential backoff for other errors
+                        time.sleep(min(base_delay * (2 ** attempt), max_delay))
+                    else:
+                        response.raise_for_status()
 
             except requests.exceptions.RequestException as e:
+                self.log_message(
+                    f"Request failed (attempt {attempt + 1}/{max_retries}): {str(e)}",
+                    level="WARN"
+                )
+                self.log_message(
+                    f"Request URL: {url}, Headers: {headers}, Payload: {payload[:3]}... ({len(payload)} records total)",
+                    level="ERROR"
+                )
                 if attempt < max_retries - 1:
-                    log_message(
-                        f"Request failed (attempt {attempt + 1}/{max_retries}): {str(e)}", level="WARNING")
-                    time.sleep(retry_delay)
-                    retry_delay *= 2
+                    # Apply exponential backoff for network issues
+                    time.sleep(min(base_delay * (2 ** attempt), max_delay))
                 else:
-                    log_message(
-                        f"Failed to send payload after {max_retries} attempts", level="ERROR")
                     return False
 
+        """ 
+        Experimental feature: Emit the last successful state before exiting
+
+        # Graceful exit if retries are exceeded
+        self.log_message("Retries exceeded. Emitting state and exiting gracefully.", level="WARN")
+        if last_successful_state:
+            # Emit the last successful state before exiting
+            self.log_message(f"Last successful state: {last_successful_state}", level="INFO")
+            #yield AirbyteMessage(type=Type.STATE, state=last_successful_state)
+        """
         return False
 
     def write(
@@ -165,7 +211,7 @@ class DestinationInsightsHubPutTimeSeries(Destination):
         configured_catalog: ConfiguredAirbyteCatalog,
         input_messages: Iterable[AirbyteMessage],
     ) -> Iterable[AirbyteMessage]:
-        log_message("Starting the write process.", level="INFO")
+        self.log_message("Starting the write process.", level="INFO")
 
         self.validate_config(config)
         if not self.authenticator:
@@ -192,7 +238,7 @@ class DestinationInsightsHubPutTimeSeries(Destination):
                                 "_time", "unknown") for record in payload)
                             total_records_processed += len(payload)
                             batches_sent += 1
-                            log_message(
+                            self.log_message(
                                 f"Batch {batches_sent} processed. Latest timestamp: {latest_timestamp}. Total records: {total_records_processed}",
                                 level="INFO"
                             )
@@ -208,11 +254,11 @@ class DestinationInsightsHubPutTimeSeries(Destination):
 
                 elif message.type == Type.STATE:
                     last_successful_state = message
-                    log_message(
+                    self.log_message(
                         f"State message received: {message.state}", level="DEBUG")
 
             except Exception as e:
-                log_message(
+                self.log_message(
                     f"Error during write process: {str(e)}", level="ERROR")
                 raise
 
@@ -223,7 +269,7 @@ class DestinationInsightsHubPutTimeSeries(Destination):
                                        for record in payload)
                 total_records_processed += len(payload)
                 batches_sent += 1
-                log_message(
+                self.log_message(
                     f"Final batch processed. Latest timestamp: {latest_timestamp}. Total records: {total_records_processed}",
                     level="INFO"
                 )
@@ -232,7 +278,7 @@ class DestinationInsightsHubPutTimeSeries(Destination):
             else:
                 raise ValueError("Failed to send final batch")
 
-        log_message(
+        self.log_message(
             f"Write completed. Total records: {total_records_processed}, Batches: {batches_sent}",
             level="INFO"
         )

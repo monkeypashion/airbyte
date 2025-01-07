@@ -1,3 +1,17 @@
+poetry run destination-insights-hub-put-time-series spec
+
+cat sample_files/input_messages.json | poetry run destination-insights-hub-put-time-series write \
+    --config secrets/config.json \
+    --catalog sample_files/configured_catalog.json
+
+airbyte-ci connectors --name=destination-insights-hub-put-time-series build
+
+docker logout
+docker login
+
+docker tag airbyte/destination-insights-hub-put-time-series:dev tjpdocker/destination-insights-hub-put-time-series:0.0.23
+docker push tjpdocker/destination-insights-hub-put-time-series:0.0.23
+
 # Insights Hub Put Time Series Destination
 
 This is the repository for the Insights Hub Put Time Series destination connector, written in Python.
@@ -76,8 +90,8 @@ docker run --rm \
     --catalog /sample_files/configured_catalog.json \
     < sample_files/input_messages.json
 
-docker tag airbyte/destination-insights-hub-put-time-series:dev tjpdocker/destination-insights-hub-put-time-series:0.0.14
-docker push tjpdocker/destination-insights-hub-put-time-series:0.0.14
+docker tag airbyte/destination-insights-hub-put-time-series:dev tjpdocker/destination-insights-hub-put-time-series:0.0.19
+docker push tjpdocker/destination-insights-hub-put-time-series:0.0.19
 ```
 
 ### Running our CI test suite
